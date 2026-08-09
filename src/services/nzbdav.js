@@ -875,6 +875,24 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   const isHead = originalMethod === 'HEAD';
   const proxiedMethod = originalMethod;
 
+  // Admin "Release" aborts the concurrency controller. Make that cancellation
+  // terminate the downstream HTTP response too, not just the upstream Axios/WebDAV
+  // request, so the player immediately loses its playback connection.
+  const streamSignal = req.streamConcurrencySignal;
+  if (streamSignal) {
+    const abortDownstream = () => {
+      if (!res.destroyed && !res.writableEnded) {
+        try { res.destroy(); } catch (_) {}
+      }
+    };
+    if (streamSignal.aborted) {
+      abortDownstream();
+      return;
+    }
+    streamSignal.addEventListener('abort', abortDownstream, { once: true });
+    res.once('close', () => streamSignal.removeEventListener('abort', abortDownstream));
+  }
+
   const normalizedPath = normalizeNzbdavPath(viewPath);
   const encodedPath = normalizedPath
     .split('/')
@@ -932,6 +950,7 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
       },
       timeout: NZBDAV_STREAM_TIMEOUT_MS,
       validateStatus: (status) => status < 500,
+      signal: req.streamConcurrencySignal,
       httpAgent: nzbdavHttpAgent,
       httpsAgent: nzbdavHttpsAgent
     };
@@ -983,6 +1002,7 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
     responseType: isHead ? undefined : 'stream',
     timeout: isHead ? 30000 : NZBDAV_STREAM_TIMEOUT_MS,
     validateStatus: (status) => status < 500,
+    signal: req.streamConcurrencySignal,
     httpAgent: nzbdavHttpAgent,
     httpsAgent: nzbdavHttpsAgent
   };

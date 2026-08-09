@@ -2999,5 +2999,5 @@
   applyTmdbLanguageSelectionsFromHidden();
   setupSuggestionPanels();
   syncSaveGuard();
-  setupSectionCollapsers();
+  init();
 })();

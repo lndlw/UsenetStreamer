@@ -61,7 +61,13 @@ function acquire(profileKey, sessionKey, limit) {
     if (Number.isFinite(limit) && limit > 0 && sessions.size >= limit) {
       return { allowed: false, release: () => {} };
     }
-    entry = { openConnections: 0, graceTimer: null, lastActivity: Date.now() };
+    entry = {
+      openConnections: 0,
+      graceTimer: null,
+      lastActivity: Date.now(),
+      controllers: new Set(),
+      forceReleased: false,
+    };
     sessions.set(sessionKey, entry);
   }
 
@@ -72,10 +78,22 @@ function acquire(profileKey, sessionKey, limit) {
   entry.openConnections += 1;
   entry.lastActivity = Date.now();
 
+  // Each HTTP response gets its own AbortController. The admin "Release"
+  // action aborts every controller belonging to this title, which tears down
+  // both the downstream response and the upstream NZBDav request.
+  const controller = new AbortController();
+  entry.controllers.add(controller);
+
   let released = false;
   const release = () => {
     if (released) return;
     released = true;
+    entry.controllers.delete(controller);
+
+    // forceRelease() already removed this entry and aborted its controllers.
+    // Do not create a new grace timer for an entry that has been forcibly killed.
+    if (entry.forceReleased) return;
+
     entry.openConnections = Math.max(0, entry.openConnections - 1);
     if (entry.openConnections === 0) {
       entry.graceTimer = setTimeout(() => {
@@ -91,7 +109,7 @@ function acquire(profileKey, sessionKey, limit) {
     }
   };
 
-  return { allowed: true, release };
+  return { allowed: true, release, signal: controller.signal };
 }
 
 // Refreshes a session's last-activity timestamp. Call this on real data flow
@@ -144,7 +162,25 @@ function forceRelease(profileKey, sessionKey) {
   const sessions = activeByProfile.get(profileKey);
   const entry = sessions && sessions.get(sessionKey);
   if (!entry) return false;
+
+  // Mark the entry before aborting anything because aborting a controller
+  // synchronously triggers the response's close handler, which calls release().
+  entry.forceReleased = true;
   if (entry.graceTimer) clearTimeout(entry.graceTimer);
+
+  // Kill every HTTP connection currently belonging to this title. The
+  // corresponding AbortController is also wired into the NZBDav Axios request,
+  // so this terminates the upstream WebDAV transfer rather than merely
+  // removing the accounting entry.
+  for (const controller of entry.controllers) {
+    try {
+      controller.abort(new Error('Stream manually released by administrator'));
+    } catch (_) {
+      // Ignore an already-aborted/unsupported controller.
+    }
+  }
+  entry.controllers.clear();
+
   sessions.delete(sessionKey);
   if (sessions.size === 0) activeByProfile.delete(profileKey);
   console.log(`[STREAM-LIMIT] Manually released session "${sessionKey}" for profile "${profileKey}"`);

@@ -4753,7 +4753,7 @@ function applyStreamConcurrencyGate(req, res, profileEff, type, id) {
 
   const profileKey = req.profileName || '__default__';
   const sessionKey = `${type}:${id}`;
-  const { allowed, release } = streamConcurrency.acquire(profileKey, sessionKey, limit);
+  const { allowed, release, signal } = streamConcurrency.acquire(profileKey, sessionKey, limit);
   if (!allowed) {
     console.warn(`[STREAM-LIMIT] Blocked new stream for profile "${profileKey}" (${type}:${id}) — already at the limit of ${limit} concurrent stream(s)`);
     // 503 + Retry-After: this URL is being requested directly by the video
@@ -4780,6 +4780,11 @@ function applyStreamConcurrencyGate(req, res, profileEff, type, id) {
     streamConcurrency.touch(profileKey, sessionKey);
     return originalEnd(...args);
   };
+
+  // Expose the per-HTTP-request cancellation signal to proxyNzbdavStream().
+  // The admin Release action aborts this signal, which destroys the client
+  // response and cancels the upstream Axios/WebDAV request.
+  req.streamConcurrencySignal = signal;
 
   let released = false;
   const doRelease = () => {
