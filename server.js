@@ -572,6 +572,30 @@ adminApiRouter.delete('/profiles/:slug', (req, res) => {
   }
 });
 
+// Live view of every concurrently-active stream session (see streamConcurrency.js),
+// for the dashboard's "Active Streams" panel — lets an admin see what's holding a
+// profile's NZB_STREAM_LIMIT slots and manually free one instead of waiting for a
+// player's stuck connection to hit the TTL backstop.
+adminApiRouter.get('/stream-sessions', (req, res) => {
+  res.json({ sessions: streamConcurrency.listActive() });
+});
+
+adminApiRouter.post('/stream-sessions/release', (req, res) => {
+  const body = req.body || {};
+  const profileKey = typeof body.profileKey === 'string' ? body.profileKey : '';
+  const sessionKey = typeof body.sessionKey === 'string' ? body.sessionKey : '';
+  if (!profileKey || !sessionKey) {
+    res.status(400).json({ error: 'profileKey and sessionKey are required' });
+    return;
+  }
+  const released = streamConcurrency.forceRelease(profileKey, sessionKey);
+  if (!released) {
+    res.status(404).json({ error: 'No matching active session' });
+    return;
+  }
+  res.json({ success: true });
+});
+
 // Preview a sort-config import — returns the parsed slice without
 // persisting anything. The frontend uses this to show the user what will be
 // applied before they save.

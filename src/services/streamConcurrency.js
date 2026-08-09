@@ -14,16 +14,22 @@
 // into the freed slot mid-watch.
 //
 // That path relies on the HTTP response actually emitting 'close'/'finish'. If
-// a client crashes or the network drops without a clean TCP close, that event
+// a client crashes, or a player's "stop" doesn't cleanly abort the underlying
+// HTTP request (common — many players just stop reading rather than closing
+// the connection), or the network drops without a clean TCP close, that event
 // can be delayed indefinitely (or, in rare proxy/keep-alive configurations,
 // never arrive), which would pin a slot forever. HARD_TTL_MS is the backstop:
 // every open connection is expected to touch its session periodically via real
 // data flow (see touch()); a session that goes quiet for longer than the TTL
 // is force-expired by the sweep below, regardless of what openConnections says.
+// Kept short (a few minutes, not tens of minutes) so a profile — especially
+// one with a tight limit like 1 — self-heals from a stuck "stop" at
+// interactive speed instead of leaving someone locked out. See also
+// listActive()/forceRelease() for an immediate manual override.
 
 const GRACE_MS = 45 * 1000;
-const HARD_TTL_MS = 15 * 60 * 1000; // no data flow for this long => treat as dead
-const SWEEP_INTERVAL_MS = 60 * 1000;
+const HARD_TTL_MS = 3 * 60 * 1000; // no data flow for this long => treat as dead
+const SWEEP_INTERVAL_MS = 30 * 1000;
 
 // profileKey -> Map<sessionKey, { openConnections: number, graceTimer: Timeout|null, lastActivity: number }>
 const activeByProfile = new Map();
@@ -111,6 +117,40 @@ function activeCount(profileKey) {
   return sessions ? sessions.size : 0;
 }
 
+// Snapshot of every active session across all profiles, for the admin dashboard.
+// Returns plain objects (no live references) so callers can't mutate internal state.
+function listActive() {
+  const now = Date.now();
+  const out = [];
+  activeByProfile.forEach((sessions, profileKey) => {
+    sessions.forEach((entry, sessionKey) => {
+      out.push({
+        profileKey,
+        sessionKey,
+        openConnections: entry.openConnections,
+        idleMs: now - entry.lastActivity,
+      });
+    });
+  });
+  return out;
+}
+
+// Manually frees a session immediately, regardless of openConnections or the
+// TTL — used by the admin dashboard's "Release" action so a stuck session
+// (e.g. a player's "stop" that didn't cleanly close the connection) doesn't
+// have to wait out the TTL sweep. Returns true if a session was actually
+// removed, false if there was nothing to release.
+function forceRelease(profileKey, sessionKey) {
+  const sessions = activeByProfile.get(profileKey);
+  const entry = sessions && sessions.get(sessionKey);
+  if (!entry) return false;
+  if (entry.graceTimer) clearTimeout(entry.graceTimer);
+  sessions.delete(sessionKey);
+  if (sessions.size === 0) activeByProfile.delete(profileKey);
+  console.log(`[STREAM-LIMIT] Manually released session "${sessionKey}" for profile "${profileKey}"`);
+  return true;
+}
+
 // Backstop sweep: force-expire any session that's had zero data flow for
 // longer than HARD_TTL_MS, even if we never saw its connection(s) close. This
 // only fires for genuinely stuck/orphaned sessions — any session with real
@@ -132,4 +172,4 @@ function sweepExpired() {
 const sweepTimer = setInterval(sweepExpired, SWEEP_INTERVAL_MS);
 if (typeof sweepTimer.unref === 'function') sweepTimer.unref();
 
-module.exports = { acquire, touch, isSessionActive, activeCount, sweepExpired, GRACE_MS, HARD_TTL_MS };
+module.exports = { acquire, touch, isSessionActive, activeCount, listActive, forceRelease, sweepExpired, GRACE_MS, HARD_TTL_MS };

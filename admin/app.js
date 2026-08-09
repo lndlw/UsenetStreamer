@@ -1263,6 +1263,76 @@
   // ... (existing functions)
 
 
+  // Active Streams panel: shows what's currently holding each profile's
+  // NZB_STREAM_LIMIT slots, with a manual Release action for a session stuck
+  // by a player that didn't cleanly close its connection (see
+  // src/services/streamConcurrency.js — this is the same TTL/grace mechanism,
+  // just surfaced so an admin doesn't have to wait it out or restart the addon).
+  function fmtIdle(ms) {
+    const s = Math.round(ms / 1000);
+    if (s < 60) return s + 's';
+    return Math.round(s / 60) + 'm';
+  }
+
+  async function refreshActiveStreams() {
+    const listEl = document.getElementById('activeStreamsList');
+    if (!listEl) return;
+    if (!getToken()) return; // not loaded/authenticated yet
+    let data;
+    try {
+      data = await apiRequest('/admin/api/stream-sessions');
+    } catch (error) {
+      listEl.innerHTML = `<p class="field-hint">Could not load active streams: ${error.message || 'request failed'}</p>`;
+      return;
+    }
+    const sessions = (data && data.sessions) || [];
+    if (sessions.length === 0) {
+      listEl.innerHTML = '<p class="field-hint">No active streams right now.</p>';
+      return;
+    }
+    listEl.innerHTML = '';
+    const table = document.createElement('table');
+    table.className = 'info-table';
+    const thead = document.createElement('thead');
+    thead.innerHTML = '<tr><th>Profile</th><th>Title</th><th>Connections</th><th>Status</th><th></th></tr>';
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    sessions.forEach((s) => {
+      const tr = document.createElement('tr');
+      const tdProfile = document.createElement('td');
+      tdProfile.textContent = s.profileKey;
+      const tdTitle = document.createElement('td');
+      tdTitle.textContent = s.sessionKey;
+      const tdConn = document.createElement('td');
+      tdConn.textContent = String(s.openConnections);
+      const tdStatus = document.createElement('td');
+      tdStatus.textContent = s.openConnections > 0 ? 'streaming' : `idle ${fmtIdle(s.idleMs)} (grace)`;
+      const tdAction = document.createElement('td');
+      const releaseBtn = document.createElement('button');
+      releaseBtn.type = 'button';
+      releaseBtn.className = 'secondary';
+      releaseBtn.textContent = 'Release';
+      releaseBtn.addEventListener('click', async () => {
+        releaseBtn.disabled = true;
+        releaseBtn.textContent = 'Releasing\u2026';
+        try {
+          await apiRequest('/admin/api/stream-sessions/release', {
+            method: 'POST',
+            body: JSON.stringify({ profileKey: s.profileKey, sessionKey: s.sessionKey }),
+          });
+        } catch (error) {
+          // fall through to refresh either way \u2014 the row will reflect current state
+        }
+        refreshActiveStreams();
+      });
+      tdAction.appendChild(releaseBtn);
+      tr.append(tdProfile, tdTitle, tdConn, tdStatus, tdAction);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    listEl.appendChild(table);
+  }
+
   // Initialization
   function init() {
     const storedToken = getStoredToken();
@@ -1275,6 +1345,7 @@
         setStoredToken(tokenInput.value);
         loadConfiguration().then(() => {
           setupPatternPreview(); // Init preview after load
+          refreshActiveStreams();
         });
       });
     }
@@ -1283,6 +1354,8 @@
     if (saveButton) saveButton.addEventListener('click', handleSave);
 
     setupSectionCollapsers();
+    if (getToken()) refreshActiveStreams();
+    setInterval(refreshActiveStreams, 15000);
   }
 
   // Add a chevron to each top-level <section.group> header that toggles

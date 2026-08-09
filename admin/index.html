@@ -88,7 +88,7 @@
             </label>
             <label>Concurrent Stream Limit (optional)
               <input name="NZB_STREAM_LIMIT" type="number" min="0" step="1" placeholder="1" />
-              <span class="field-hint">Max number of DIFFERENT titles this profile can stream at the same time. Starting a new title beyond the limit shows a "limit reached" message in the stream picker instead of playable results; the raw playback URL also refuses with a retry-friendly error if hit directly. Seeking/reconnecting within the same title never counts as a second stream. A crashed/orphaned connection is force-released after ~15 minutes of no data flow. <strong>Leave blank to default to 1</strong> — set to <strong>0</strong> to explicitly allow unlimited concurrent streams for this profile. Only enforced in NZBDav mode — native mode streams directly from the indexer, outside the addon's proxy.</span>
+              <span class="field-hint">Max number of DIFFERENT titles this profile can stream at the same time. Starting a new title beyond the limit shows a "limit reached" message in the stream picker instead of playable results; the raw playback URL also refuses with a retry-friendly error if hit directly. Seeking/reconnecting within the same title never counts as a second stream. A crashed/orphaned connection is force-released after ~3 minutes of no data flow (or release it immediately from the Active Streams panel below). <strong>Leave blank to default to 1</strong> — set to <strong>0</strong> to explicitly allow unlimited concurrent streams for this profile. Only enforced in NZBDav mode — native mode streams directly from the indexer, outside the addon's proxy.</span>
             </label>
           </div>
           <div id="nativeModeNotice" class="info-box hidden">
@@ -1099,6 +1099,12 @@ health'></textarea>
       </div>
 
       <p class="support-note">If you like this addon, please consider <a href="https://github.com/sponsors/Sanket9225" target="_blank" rel="noopener">sponsoring on GitHub</a>.</p>
+
+      <div class="group" id="activeStreamsPanel">
+        <h3>Active Streams</h3>
+        <p class="field-hint">Titles currently counted against each profile's Concurrent Stream Limit. If a player's "stop" doesn't cleanly close its connection, the slot self-releases within ~3 minutes of no data flow — or release it immediately here.</p>
+        <div id="activeStreamsList"><p class="field-hint">Enter your token above and load configuration to see active streams.</p></div>
+      </div>
     </section>
   </main>
   <script src="/utils/templateEngine.js"></script>
