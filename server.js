@@ -105,6 +105,7 @@ const autoAdvanceQueue = require('./src/services/autoAdvanceQueue');
 const backgroundTriage = require('./src/services/backgroundTriage');
 const diskNzbCache = require('./src/cache/diskNzbCache');
 const profileManager = require('./src/services/profileManager');
+const streamConcurrency = require('./src/services/streamConcurrency');
 
 // Periodic janitor — prune caches + sessions on a timer so RAM/disk stay
 // bounded without relying on an admin config-save. unref() so it never keeps
@@ -253,6 +254,9 @@ adminApiRouter.get('/config', (req, res) => {
   if (!values.NZB_MAX_RESULT_SIZE_GB) {
     values.NZB_MAX_RESULT_SIZE_GB = String(DEFAULT_MAX_RESULT_SIZE_GB);
   }
+  if (!values.NZB_STREAM_LIMIT) {
+    values.NZB_STREAM_LIMIT = String(profileManager.DEFAULT_STREAM_LIMIT);
+  }
   if (!values.TMDB_SEARCH_MODE) {
     values.TMDB_SEARCH_MODE = 'english_only';
   }
@@ -284,6 +288,7 @@ adminApiRouter.post('/config', async (req, res) => {
   // something that disables a feature or breaks triage. Empty = "use default".
   const NUMERIC_FIELD_RULES = {
     NZB_RESOLUTION_LIMIT_PER_QUALITY: { min: 0, integer: true, label: 'Results per quality' },
+    NZB_STREAM_LIMIT: { min: 0, integer: true, label: 'Concurrent stream limit' },
     NZB_MIN_RESULT_SIZE_GB: { min: 0, label: 'Min result size (GB)' },
     NZB_MAX_RESULT_SIZE_GB: { min: 0, label: 'Max result size (GB)' },
     NZB_MAX_BITRATE_MBPS: { min: 0, label: 'Max bitrate (Mbps)' },
@@ -1240,6 +1245,7 @@ const ADMIN_CONFIG_KEYS = [
   'NZB_HIDE_BLOCKED_RESULTS',
   'NZB_ALLOWED_RESOLUTIONS',
   'NZB_RESOLUTION_LIMIT_PER_QUALITY',
+  'NZB_STREAM_LIMIT',
   'NZB_RELEASE_EXCLUSIONS',
   'NZB_NAMING_PATTERN',
   'NZB_DISPLAY_NAME_PATTERN',
@@ -1563,6 +1569,31 @@ async function streamHandler(req, res) {
   if (req.profileName && !profileEff) {
     res.status(404).json({ streams: [] });
     return;
+  }
+  // Per-profile concurrent-stream cap, checked here (not just at the playback
+  // proxy) so the user sees an explanation IN the Stremio stream picker instead
+  // of tapping a stream that only fails once the player tries to load it. Skips
+  // the (expensive) search entirely when we already know it's futile. A title
+  // already streaming for this profile is exempt, so resuming or refreshing the
+  // list mid-watch never triggers this.
+  {
+    const streamLimit = resolveEffectiveStreamLimit(profileEff);
+    const concurrencyProfileKey = req.profileName || '__default__';
+    const concurrencySessionKey = `${type}:${id}`;
+    if (streamLimit > 0
+        && !streamConcurrency.isSessionActive(concurrencyProfileKey, concurrencySessionKey)
+        && streamConcurrency.activeCount(concurrencyProfileKey) >= streamLimit) {
+      console.log(`[STREAM-LIMIT] Profile "${concurrencyProfileKey}" at capacity (${streamLimit}) — returning limit notice for ${type}:${id}`);
+      res.json({
+        streams: [{
+          name: '⛔ Stream limit reached',
+          title: `Already streaming ${streamLimit} title${streamLimit === 1 ? '' : 's'} on this profile`,
+          description: 'Stop an active stream on this profile first, then reload this page to try again.',
+          externalUrl: ADDON_BASE_URL || undefined,
+        }],
+      });
+      return;
+    }
   }
   // Per-profile sort/filter/dedup source: overlay this profile's overrides onto
   // global env. For the default profile (profileEff null) this IS process.env, so
@@ -4668,6 +4699,75 @@ function isStreamStartRequest(req) {
   return Boolean(m) && Number(m[1]) === 0;
 }
 
+// Resolves a profile's effective concurrent-stream limit as a plain number:
+// 0 = explicitly unlimited, N>0 = cap. Ties directly into profileManager's
+// profile.streamLimit / config.streamLimit (normalized: null = unconfigured,
+// which falls back to profileManager.DEFAULT_STREAM_LIMIT here — a profile
+// that never sets NZB_STREAM_LIMIT is capped at 1 concurrent stream by
+// default; set it to 0 explicitly to opt that profile into no limit).
+function resolveEffectiveStreamLimit(profileEff) {
+  const configured = profileEff
+    ? profileEff.config.streamLimit
+    : profileManager.resolveStreamLimit(process.env.NZB_STREAM_LIMIT);
+  return configured === null ? profileManager.DEFAULT_STREAM_LIMIT : configured;
+}
+
+// Per-profile concurrent-stream gate. HEAD requests are probes (Stremio uses
+// them to check playability) and never occupy a slot. Call once per top-level
+// stream request, right after type/id are known and before any expensive work.
+// Returns false (and has already responded) when the profile is at its cap for
+// a NEW title — the caller should return immediately in that case.
+//
+// On success, wraps res.write/res.end so every real chunk of video data sent
+// to the client refreshes the session's heartbeat (see streamConcurrency's
+// HARD_TTL_MS) — this is what lets the TTL backstop tell "still actively
+// streaming" apart from "connection died without a close event".
+function applyStreamConcurrencyGate(req, res, profileEff, type, id) {
+  if ((req.method || 'GET').toUpperCase() === 'HEAD') return true;
+  const limit = resolveEffectiveStreamLimit(profileEff);
+  if (limit <= 0) return true; // explicit unlimited
+
+  const profileKey = req.profileName || '__default__';
+  const sessionKey = `${type}:${id}`;
+  const { allowed, release } = streamConcurrency.acquire(profileKey, sessionKey, limit);
+  if (!allowed) {
+    console.warn(`[STREAM-LIMIT] Blocked new stream for profile "${profileKey}" (${type}:${id}) — already at the limit of ${limit} concurrent stream(s)`);
+    // 503 + Retry-After: this URL is being requested directly by the video
+    // player (not the Stremio app's stream-list resource), so there's no
+    // addon-protocol field for a user-facing message here — the best we can
+    // do is a standard, retry-friendly HTTP signal. The list-level check in
+    // streamHandler is what actually shows the user a readable explanation
+    // before they ever get here.
+    res.setHeader('Retry-After', String(Math.ceil(streamConcurrency.GRACE_MS / 1000)));
+    res.status(503).json({
+      error: `This profile is already streaming ${limit} title${limit === 1 ? '' : 's'} at once. Stop one before starting another, then retry.`,
+    });
+    return false;
+  }
+
+  streamConcurrency.touch(profileKey, sessionKey);
+  const originalWrite = res.write.bind(res);
+  const originalEnd = res.end.bind(res);
+  res.write = (...args) => {
+    streamConcurrency.touch(profileKey, sessionKey);
+    return originalWrite(...args);
+  };
+  res.end = (...args) => {
+    streamConcurrency.touch(profileKey, sessionKey);
+    return originalEnd(...args);
+  };
+
+  let released = false;
+  const doRelease = () => {
+    if (released) return;
+    released = true;
+    release();
+  };
+  res.on('close', doRelease);
+  res.on('finish', doRelease);
+  return true;
+}
+
 // --- Smart Play endpoint ---
 // When user clicks Smart Play, wait for the first healthy NZB from the background triage session,
 // then proxy the stream. If that stream fails, try the next auto-advance automatically.
@@ -4687,6 +4787,7 @@ async function handleSmartPlay(req, res) {
     res.status(400).json({ error: 'Missing contentKey parameter' });
     return;
   }
+  if (!applyStreamConcurrencyGate(req, res, profileEff, type, id)) return;
 
   const requestedEpisode = parseRequestedEpisode(type, id, req.query || {});
 
@@ -4956,6 +5057,7 @@ async function handleNzbdavStream(req, res) {
   const profileEff = req.profileName ? profileManager.getEffectiveConfig(req.profileName) : null;
   const effProtection = resolveRequestProtection(profileEff);
   let { downloadUrl, type = 'movie', id = '', title = 'NZB Stream' } = req.query;
+  if (!applyStreamConcurrencyGate(req, res, profileEff, type, id)) return;
   const easynewsPayload = typeof req.query.easynewsPayload === 'string' ? req.query.easynewsPayload : null;
   const declaredSize = Number(req.query.size);
 

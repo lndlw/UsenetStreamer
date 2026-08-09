@@ -86,6 +86,10 @@
               </select>
               <span class="field-hint" id="streamingModeHint">Applies on save — no restart needed. Switching mode changes the addon ID, so you may need to re-add the addon in Stremio.</span>
             </label>
+            <label>Concurrent Stream Limit (optional)
+              <input name="NZB_STREAM_LIMIT" type="number" min="0" step="1" placeholder="1" />
+              <span class="field-hint">Max number of DIFFERENT titles this profile can stream at the same time. Starting a new title beyond the limit shows a "limit reached" message in the stream picker instead of playable results; the raw playback URL also refuses with a retry-friendly error if hit directly. Seeking/reconnecting within the same title never counts as a second stream. A crashed/orphaned connection is force-released after ~15 minutes of no data flow. <strong>Leave blank to default to 1</strong> — set to <strong>0</strong> to explicitly allow unlimited concurrent streams for this profile. Only enforced in NZBDav mode — native mode streams directly from the indexer, outside the addon's proxy.</span>
+            </label>
           </div>
           <div id="nativeModeNotice" class="info-box hidden">
             <strong>⚡ Stremio Native Mode</strong>

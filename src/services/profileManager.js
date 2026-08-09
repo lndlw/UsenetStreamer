@@ -20,6 +20,12 @@
 
 const MAX_PROFILES = 50;
 
+// A profile that never configures NZB_STREAM_LIMIT (no override, no global
+// default either) gets this cap rather than being treated as unlimited — a
+// safer default for production. Set NZB_STREAM_LIMIT=0 explicitly to opt a
+// profile (or the global default) into no limit.
+const DEFAULT_STREAM_LIMIT = 1;
+
 // Per-profile field suffix -> the global env key it overrides.
 // NAME is the identifier/URL slug and has no global counterpart (handled separately).
 // Covers addon name, streaming mode, protection, and the full sort/filter surface
@@ -63,6 +69,7 @@ const PROFILE_OVERRIDES = {
   NAMING_PATTERN: 'NZB_NAMING_PATTERN',
   DISPLAY_NAME_PATTERN: 'NZB_DISPLAY_NAME_PATTERN',
   CATALOG_LIMIT: 'NZBDAV_HISTORY_CATALOG_LIMIT',
+  STREAM_LIMIT: 'NZB_STREAM_LIMIT',
 };
 
 // All per-slot field suffixes (NAME first, then the overridable categories).
@@ -114,8 +121,27 @@ function resolveStreamingMode(profileMode, defaultMode) {
   return normalizeStreamingMode(defaultMode); // inherit default
 }
 
+// Normalizes a raw NZB_STREAM_LIMIT value (profile override or global env
+// string). Returns:
+//   null        — not configured at all (caller applies DEFAULT_STREAM_LIMIT)
+//   0           — explicitly configured as unlimited
+//   N (>0)      — explicit concurrent-stream cap
+// Deliberately NOT `rawValue || DEFAULT_STREAM_LIMIT` — that would collapse an
+// explicit "0" (unlimited) into the default, which is the opposite of what an
+// admin setting a profile to 0 asked for.
+function resolveStreamLimit(rawValue) {
+  if (rawValue === undefined || rawValue === null || String(rawValue).trim() === '') {
+    return null;
+  }
+  const n = parseInt(rawValue, 10);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
 // Parse all active profile slots from a source (defaults to process.env).
-// Returns Map<slug, { name, slug, slot, overrides: { <SUFFIX>: value } }>.
+// Returns Map<slug, { name, slug, slot, overrides, streamLimit }>. streamLimit
+// is the profile's own resolveStreamLimit() result — null if this profile
+// doesn't override NZB_STREAM_LIMIT AND no global default is set either.
 function getProfiles(source = process.env) {
   const profiles = new Map();
   for (let i = 1; i <= MAX_PROFILES; i += 1) {
@@ -131,7 +157,10 @@ function getProfiles(source = process.env) {
         overrides[suffix] = String(v);
       }
     });
-    profiles.set(slug, { name: rawName, slug, slot: idx, overrides });
+    const streamLimit = resolveStreamLimit(
+      overrides.STREAM_LIMIT !== undefined ? overrides.STREAM_LIMIT : source.NZB_STREAM_LIMIT,
+    );
+    profiles.set(slug, { name: rawName, slug, slot: idx, overrides, streamLimit });
   }
   return profiles;
 }
@@ -140,12 +169,18 @@ function getProfiles(source = process.env) {
 // every per-profile key. For no profileName, returns the globals unchanged.
 // Returns null if a profileName is given but no matching active profile exists
 // (callers treat that as a 404 in later phases).
+// config.streamLimit is always present (normalized via resolveStreamLimit) —
+// null if unconfigured (caller applies DEFAULT_STREAM_LIMIT), 0 if explicitly
+// unlimited, or a positive integer cap.
 function getEffectiveConfig(profileName, source = process.env) {
   const config = {};
   Object.values(PROFILE_OVERRIDES).forEach((globalKey) => {
     config[globalKey] = source[globalKey];
   });
-  if (!profileName) return { profile: null, config };
+  if (!profileName) {
+    config.streamLimit = resolveStreamLimit(config.NZB_STREAM_LIMIT);
+    return { profile: null, config };
+  }
 
   const slug = slugifyProfileName(profileName);
   const profile = getProfiles(source).get(slug);
@@ -157,11 +192,13 @@ function getEffectiveConfig(profileName, source = process.env) {
   });
   // Use the profile's streaming mode, or inherit the default when unset.
   config.STREAMING_MODE = resolveStreamingMode(config.STREAMING_MODE, source.STREAMING_MODE);
+  config.streamLimit = resolveStreamLimit(config.NZB_STREAM_LIMIT);
   return { profile, config };
 }
 
 module.exports = {
   MAX_PROFILES,
+  DEFAULT_STREAM_LIMIT,
   PROFILE_OVERRIDES,
   PROFILE_FIELD_SUFFIXES,
   PROFILE_NUMBERED_KEYS,
@@ -169,6 +206,7 @@ module.exports = {
   slugifyProfileName,
   isValidProfileName,
   resolveStreamingMode,
+  resolveStreamLimit,
   getProfiles,
   getEffectiveConfig,
 };
