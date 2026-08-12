@@ -905,6 +905,11 @@ async function fetchIndexerResults(config, plan, options) {
     responseType: 'text',
     headers: {
       'User-Agent': config.searchUserAgent || getDefaultSearchUserAgent(),
+      // Match Prowlarr's .NET HttpClient (AutomaticDecompression = GZip|Deflate)
+      // rather than axios's default "gzip, compress, deflate, br" + JSON Accept,
+      // which would give the addon away as a Node client.
+      Accept: '*/*',
+      'Accept-Encoding': 'gzip, deflate',
     },
     validateStatus: () => true,
     proxy: false,

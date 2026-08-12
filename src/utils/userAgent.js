@@ -2,8 +2,8 @@
 // step with the latest Prowlarr (search) / SABnzbd (download) releases.
 //   - Prowlarr (Servarr) sends "{App}/{fullVersion} ({osName} {osVersion})".
 //   - SABnzbd sends "SABnzbd/{version}" (no OS suffix).
-const DEFAULT_SEARCH_UA = 'Prowlarr/2.4.0.5397 (ubuntu 22.04)';
-const DEFAULT_DOWNLOAD_UA = 'SABnzbd/5.0.3';
+const DEFAULT_SEARCH_UA = 'Prowlarr/2.5.2.5491 (ubuntu 24.04)';
+const DEFAULT_DOWNLOAD_UA = 'SABnzbd/5.1.0';
 
 function getDefaultSearchUserAgent() {
   return DEFAULT_SEARCH_UA;

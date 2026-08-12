@@ -246,7 +246,13 @@ async function addNzbToNzbdav({ downloadUrl, cachedEntry = null, category, jobLa
     const dlConfig = {
       responseType: 'arraybuffer',
       timeout: 30000,
-      headers: { 'User-Agent': downloadUa },
+      headers: {
+        'User-Agent': downloadUa,
+        // Look like SABnzbd fetching the NZB, not axios: generic Accept and a
+        // plain gzip/deflate encoding (drops axios's "compress, br" tell).
+        Accept: '*/*',
+        'Accept-Encoding': 'gzip, deflate',
+      },
       validateStatus: (status) => status < 500,
       proxy: false,
     };
